@@ -1,0 +1,239 @@
+Perfect 👌 let’s connect Angular (frontend) with Spring Security backend for custom login/registration + role-based auth.
+
+We’ll do this step by step:
+
+
+---
+
+🔹 1. Backend (Spring Boot + Security)
+
+Entity
+
+import jakarta.persistence.*;
+import lombok.Data;
+
+@Data
+@Entity
+@Table(name = "users")
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String username;
+    private String password;
+    private String role;  // e.g., ROLE_USER, ROLE_ADMIN
+}
+
+
+---
+
+Repository
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByUsername(String username);
+}
+
+
+---
+
+Service (UserDetailsService Implementation)
+
+import org.springframework.security.core.userdetails.*;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+
+@Service
+public class CustomUserDetailsService implements UserDetailsService {
+
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    public CustomUserDetailsService(UserRepository userRepository, PasswordEncoder passwordEncoder) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+
+        return org.springframework.security.core.userdetails.User
+                .withUsername(user.getUsername())
+                .password(user.getPassword())
+                .roles(user.getRole().replace("ROLE_", ""))
+                .build();
+    }
+
+    public User register(User user) {
+        user.setPassword(passwordEncoder.encode(user.getPassword())); // bcrypt
+        user.setRole("ROLE_USER"); // default role
+        return userRepository.save(user);
+    }
+}
+
+
+---
+
+SecurityConfig
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .cors().and()
+            .csrf().disable()
+            .authorizeHttpRequests()
+            .requestMatchers("/auth/register", "/auth/login").permitAll()
+            .requestMatchers("/admin/**").hasRole("ADMIN")
+            .requestMatchers("/user/**").hasRole("USER")
+            .anyRequest().authenticated()
+            .and()
+            .httpBasic(); // Or JWT if you prefer
+
+        return http.build();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+}
+
+
+---
+
+Auth Controller
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/auth")
+@CrossOrigin(origins = "http://localhost:4200") // Angular
+public class AuthController {
+
+    @Autowired
+    private CustomUserDetailsService userService;
+
+    @Autowired
+    private AuthenticationManager authenticationManager;
+
+    @PostMapping("/register")
+    public User register(@RequestBody User user) {
+        return userService.register(user);
+    }
+
+    @PostMapping("/login")
+    public String login(@RequestBody User loginRequest) {
+        Authentication authentication = authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(
+                        loginRequest.getUsername(),
+                        loginRequest.getPassword()
+                )
+        );
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+        return "Login successful for " + loginRequest.getUsername();
+    }
+}
+
+
+---
+
+🔹 2. Frontend (Angular)
+
+Register Component
+
+// register.component.ts
+import { HttpClient } from '@angular/common/http';
+import { Component } from '@angular/core';
+
+@Component({
+  selector: 'app-register',
+  templateUrl: './register.component.html'
+})
+export class RegisterComponent {
+  user = { username: '', password: '' };
+
+  constructor(private http: HttpClient) {}
+
+  register() {
+    this.http.post("http://localhost:8080/auth/register", this.user)
+      .subscribe(res => console.log("Registered!", res));
+  }
+}
+
+
+---
+
+Login Component
+
+// login.component.ts
+import { HttpClient } from '@angular/common/http';
+import { Component } from '@angular/core';
+
+@Component({
+  selector: 'app-login',
+  templateUrl: './login.component.html'
+})
+export class LoginComponent {
+  loginData = { username: '', password: '' };
+
+  constructor(private http: HttpClient) {}
+
+  login() {
+    this.http.post("http://localhost:8080/auth/login", this.loginData, { responseType: 'text' })
+      .subscribe(res => console.log("Login success", res));
+  }
+}
+
+
+---
+
+🔑 Flow
+
+1. User registers → stored in DB with ROLE_USER.
+
+
+2. User logs in → Spring Security authenticates with bcrypt.
+
+
+3. Depending on role:
+
+/user/** → USER role required
+
+/admin/** → ADMIN role required
+
+
+
+
+
+---
+
+👉 Do you want me to extend this with JWT tokens instead of Basic Auth** (so Angular can store token and send with requests)?
+
