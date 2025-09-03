@@ -1,0 +1,281 @@
+Perfect 👍 you mean Bearer tokens (JWT), not “bawer” 😅.
+This is the standard way to connect Angular (or React) with a Spring Boot backend today.
+
+Let’s build it step by step:
+
+
+---
+
+🔹 1. Dependencies
+
+Add to pom.xml:
+
+<dependency>
+    <groupId>io.jsonwebtoken</groupId>
+    <artifactId>jjwt-api</artifactId>
+    <version>0.11.5</version>
+</dependency>
+<dependency>
+    <groupId>io.jsonwebtoken</groupId>
+    <artifactId>jjwt-impl</artifactId>
+    <version>0.11.5</version>
+    <scope>runtime</scope>
+</dependency>
+<dependency>
+    <groupId>io.jsonwebtoken</groupId>
+    <artifactId>jjwt-jackson</artifactId>
+    <version>0.11.5</version>
+    <scope>runtime</scope>
+</dependency>
+
+
+---
+
+🔹 2. JWT Utility
+
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.security.Keys;
+import org.springframework.stereotype.Component;
+
+import java.security.Key;
+import java.util.Date;
+
+@Component
+public class JwtUtil {
+    private final String SECRET = "mysecretkeymysecretkeymysecretkey"; // use env variable in real apps
+    private final long EXPIRATION = 1000 * 60 * 60; // 1 hour
+
+    private final Key key = Keys.hmacShaKeyFor(SECRET.getBytes());
+
+    public String generateToken(String username, String role) {
+        return Jwts.builder()
+                .setSubject(username)
+                .claim("role", role)
+                .setIssuedAt(new Date())
+                .setExpiration(new Date(System.currentTimeMillis() + EXPIRATION))
+                .signWith(key, SignatureAlgorithm.HS256)
+                .compact();
+    }
+
+    public Claims extractClaims(String token) {
+        return Jwts.parserBuilder()
+                .setSigningKey(key)
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+    }
+
+    public String extractUsername(String token) {
+        return extractClaims(token).getSubject();
+    }
+
+    public String extractRole(String token) {
+        return extractClaims(token).get("role", String.class);
+    }
+}
+
+
+---
+
+🔹 3. Security Config
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf().disable()
+            .authorizeHttpRequests()
+            .requestMatchers("/auth/**").permitAll()
+            .requestMatchers("/admin/**").hasRole("ADMIN")
+            .requestMatchers("/user/**").hasRole("USER")
+            .anyRequest().authenticated()
+            .and()
+            .sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS); // no sessions
+
+        return http.build();
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+
+
+---
+
+🔹 4. JWT Filter
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+@Component
+public class JwtFilter extends OncePerRequestFilter {
+
+    private final JwtUtil jwtUtil;
+    private final UserDetailsService userDetailsService;
+
+    public JwtFilter(JwtUtil jwtUtil, UserDetailsService userDetailsService) {
+        this.jwtUtil = jwtUtil;
+        this.userDetailsService = userDetailsService;
+    }
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain) throws ServletException, IOException {
+
+        String authHeader = request.getHeader("Authorization");
+        String username = null;
+        String jwt = null;
+
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            jwt = authHeader.substring(7);
+            username = jwtUtil.extractUsername(jwt);
+        }
+
+        if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+            UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+
+            if (!jwtUtil.extractClaims(jwt).getExpiration().before(new Date())) {
+                UsernamePasswordAuthenticationToken authToken =
+                        new UsernamePasswordAuthenticationToken(
+                                userDetails, null, userDetails.getAuthorities());
+
+                authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                SecurityContextHolder.getContext().setAuthentication(authToken);
+            }
+        }
+
+        filterChain.doFilter(request, response);
+    }
+}
+
+Register this filter in SecurityConfig:
+
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+@Bean
+public SecurityFilterChain filterChain(HttpSecurity http, JwtFilter jwtFilter) throws Exception {
+    http
+        .csrf().disable()
+        .authorizeHttpRequests()
+        .requestMatchers("/auth/**").permitAll()
+        .requestMatchers("/admin/**").hasRole("ADMIN")
+        .requestMatchers("/user/**").hasRole("USER")
+        .anyRequest().authenticated()
+        .and()
+        .sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS);
+
+    http.addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
+
+    return http.build();
+}
+
+
+---
+
+🔹 5. Auth Controller
+
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/auth")
+@CrossOrigin(origins = "http://localhost:4200")
+public class AuthController {
+
+    private final AuthenticationManager authenticationManager;
+    private final JwtUtil jwtUtil;
+
+    public AuthController(AuthenticationManager authenticationManager, JwtUtil jwtUtil) {
+        this.authenticationManager = authenticationManager;
+        this.jwtUtil = jwtUtil;
+    }
+
+    @PostMapping("/login")
+    public String login(@RequestBody User loginRequest) {
+        Authentication authentication = authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(
+                        loginRequest.getUsername(),
+                        loginRequest.getPassword()
+                )
+        );
+
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+
+        String role = authentication.getAuthorities().iterator().next().getAuthority();
+        return jwtUtil.generateToken(loginRequest.getUsername(), role);
+    }
+}
+
+
+---
+
+🔹 6. Angular – Store Token
+
+// login.component.ts
+login() {
+  this.http.post("http://localhost:8080/auth/login", this.loginData, { responseType: 'text' })
+    .subscribe(token => {
+      localStorage.setItem("token", token);
+      console.log("JWT:", token);
+    });
+}
+
+For secured requests:
+
+const headers = { 'Authorization': 'Bearer ' + localStorage.getItem("token") };
+this.http.get("http://localhost:8080/user/profile", { headers })
+  .subscribe(res => console.log(res));
+
+
+---
+
+✅ Now you have:
+
+Angular sends {username, password} → Spring returns JWT.
+
+Angular stores JWT in localStorage.
+
+Every request → Angular sends Authorization: Bearer <token>.
+
+Spring validates JWT via JwtFilter.
+
+
+
+---
+
+👉 Do you want me to extend this with a refresh token flow (so user doesn’t need to log in again after expiry)?
+
